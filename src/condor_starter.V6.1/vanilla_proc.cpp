@@ -639,6 +639,19 @@ VanillaProc::StartJob()
 	{
 		setupOOMScore(0,0);
 	}
+	
+	// Set permissions to allow delegation for cgroups in case of v2, enabling job
+	// to subpartition the resources given in slot as needed
+	if (struct stat sbuf; stat("/sys/fs/cgroup/cgroup.controllers", &sbuf) == 0 && fi.cgroup != nullptr)
+	{
+		std::string cgroup_abs = std::string("/sys/fs/cgroup/") + fi.cgroup;
+		
+		TemporaryPrivSentry sentry(PRIV_ROOT);
+
+		chown(cgroup_abs.c_str(), get_user_uid(), get_user_gid());
+		chown((cgroup_abs + std::string("/cgroup.procs")).c_str(), get_user_uid(), get_user_gid());
+		chown((cgroup_abs + std::string("/cgroup.subtree_control")).c_str(), get_user_uid(), get_user_gid());
+	}
 
 #endif
 
