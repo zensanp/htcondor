@@ -37,28 +37,63 @@ static stdfs::path cgroup_mount_point() {
 	return "/sys/fs/cgroup";
 }
 
+// Return a vector of the absolute paths to all the
+// cgroup directories rooted here.
+static std::vector<stdfs::path> getTree(std::string cgroup_name) {
+        std::vector<stdfs::path> dirs;
+
+        // First add the root of the tree, the iterator below skips it
+        dirs.emplace_back(cgroup_mount_point() / cgroup_name);
+
+        // append all directories from here on down
+        for (auto entry: stdfs::recursive_directory_iterator{cgroup_mount_point() / cgroup_name}) {
+                if (stdfs::is_directory(entry)) {
+                        dirs.emplace_back(entry);
+                }
+        }
+
+        auto deepest_first = [](const stdfs::path &p1, const stdfs::path &p2) {
+                // Sort by length first, so deepest path sorts first
+                if (p1.string().length() != p2.string().length()) {
+                        return p1.string().length() > p2.string().length();
+                }
+
+                // otherwise we don't care, just lexi
+                return p1.string() > p2.string();
+        };
+
+        // Sort them so deeper (longer) dirs come first
+        std::sort(dirs.begin(), dirs.end(), deepest_first);
+
+        return dirs;
+}
+
 // mkdir the cgroup, and all required interior cgroups.  Note that the leaf
 // cgroup in v2 cannot have anything in .../cgroup_subtree_control, or else
 // we can't put a process in it.  Interior nodes *must* have the controllers
 // put in that file, or else we won't have any controllers to query in
 // our interior nodes.
-bool 
+bool
 ProcFamilyDirectCgroupV2::cgroupify_process(const std::string &cgroup_name, pid_t pid) {
-	dprintf(D_FULLDEBUG, "Creating cgroup %s for pid %d\n", cgroup_name.c_str(), pid);
+        dprintf(D_FULLDEBUG, "Creating cgroup %s for pid %d\n", cgroup_name.c_str(), pid);
 
-	TemporaryPrivSentry sentry( PRIV_ROOT );
+        TemporaryPrivSentry sentry( PRIV_ROOT );
 
-	// Start from the root of the cgroup mount point
-	stdfs::path cgroup_root_dir = cgroup_mount_point();
+        // Start from the root of the cgroup mount point
+        stdfs::path cgroup_root_dir = cgroup_mount_point();
 
-	stdfs::path cgroup_relative_to_root_dir(cgroup_name);
+        stdfs::path cgroup_relative_to_root_dir(cgroup_name);
 
-	// If the full cgroup exists, remove it to clear the various
-	// peak statistics and any existing memory
-	int r = rmdir((cgroup_root_dir / cgroup_name).c_str());
-	if ((r < 0) && (errno != ENOENT))  {
-		dprintf(D_ALWAYS, "ProcFamilyDirectCgroupV2::track_family_via_cgroup error removing cgroup %s: %s\n", cgroup_name.c_str(), strerror(errno));
-	}
+        int r;
+        // If the full cgroup exists, remove it to clear the various
+        // peak statistics and any existing memory
+        for (auto dir: getTree(cgroup_mount_point() / cgroup_name)) {
+                r = rmdir(dir.c_str());
+                if ((r < 0) && (errno != ENOENT)) {
+                        dprintf(D_ALWAYS, "ProcFamilyDirectCgroupV2::unregister_family error removing cgroup %s: %s\n", cgroup_name.c_str(), strerror(errno));
+                }
+        }
+
 
 	// Accumulate along path components
 	auto interior_dir_maker = [](const stdfs::path &fulldir, const stdfs::path &next_part) {
@@ -429,37 +464,6 @@ ProcFamilyDirectCgroupV2::kill_family(pid_t pid)
 	this->signal_process(pid, SIGKILL);
 	this->continue_family(pid);
 	return true;
-}
-
-// Return a vector of the absolute paths to all the
-// cgroup directories rooted here.
-static std::vector<stdfs::path> getTree(std::string cgroup_name) {
-	std::vector<stdfs::path> dirs;
-
-	// First add the root of the tree, the iterator below skips it
-	dirs.emplace_back(cgroup_mount_point() / cgroup_name);
-
-	// append all directories from here on down
-	for (auto entry: stdfs::recursive_directory_iterator{cgroup_mount_point() / cgroup_name}) {
-		if (stdfs::is_directory(entry)) {
-			dirs.emplace_back(entry);
-		}	
-	}
-
-	auto deepest_first = [](const stdfs::path &p1, const stdfs::path &p2) {
-		// Sort by length first, so deepest path sorts first
-		if (p1.string().length() != p2.string().length()) {
-			return p1.string().length() > p2.string().length();
-		}
-
-		// otherwise we don't care, just lexi
-		return p1.string() > p2.string();
-	};
-
-	// Sort them so deeper (longer) dirs come first
-	std::sort(dirs.begin(), dirs.end(), deepest_first);
-
-	return dirs;
 }
 
 //
