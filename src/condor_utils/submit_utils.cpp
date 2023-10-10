@@ -71,6 +71,21 @@ GCC_DIAG_OFF(float-equal)
 
 #define exit(n)  poison_exit(n)
 
+// TODO: Set up retrieval of map file from schedd for and remove this function
+MapFile* getProtectedURLMap() {
+	MapFile *map = nullptr;
+	std::string urlMapFile;
+	param(urlMapFile, "PROTECTED_URL_TRANSFER_MAPFILE");
+	if (! urlMapFile.empty()) {
+		map = new MapFile();
+		int ret = map->ParseCanonicalizationFile(urlMapFile, true, true, true);
+		if (ret < 0) {
+			delete map;
+			map = nullptr;
+		}
+	}
+	return map;
+}
 // When this class is wrapped around a classad that has a chained parent ad
 // inserts and assignments will check to see if the value being assigned
 // is the same as the value in the chained parent, and if so will NOT do
@@ -561,6 +576,7 @@ SubmitHash::~SubmitHash()
 	delete job; job = nullptr;
 	delete procAd; procAd = nullptr;
 	delete jobsetAd; jobsetAd = nullptr;
+	protectedUrlMap = nullptr; // Submit Hash does not own this object
 
 	// detach but do not delete the cluster ad
 	//PRAGMA_REMIND("tj: should we copy/delete the cluster ad?")
@@ -4258,7 +4274,9 @@ int SubmitHash::SetExecutable()
 	}
 
 	if (IsContainerJob) {
-		// container universe also allows docker_image to force a docker image to be used
+		// container universe also allows docker_image to force a docker image to be used.
+		// Note that in the normal late materialization case, neither image command will be present
+		// by the time we materialize ProcId > 0, that just means that the image is the same for all jobs
 		auto_free_ptr docker_image(submit_param(SUBMIT_KEY_DockerImage, ATTR_DOCKER_IMAGE));
 		if (docker_image) {
 			const char * image = check_docker_image(docker_image.ptr());
@@ -4277,6 +4295,21 @@ int SubmitHash::SetExecutable()
 				ABORT_AND_RETURN(1);
 			}
 			AssignJobString(ATTR_CONTAINER_IMAGE, image);
+
+			ContainerImageType image_type = image_type_from_string(image);
+			switch (image_type) {
+			case ContainerImageType::DockerRepo:
+				AssignJobVal(ATTR_WANT_DOCKER_IMAGE, true);
+				break;
+			case ContainerImageType::SIF:
+				AssignJobVal(ATTR_WANT_SIF,true);
+				break;
+			case ContainerImageType::SandboxImage:
+			default: // default should be unreachable...
+				AssignJobVal(ATTR_WANT_SANDBOX_IMAGE, true);
+				break;
+			}
+
 		} else if (!job->Lookup(ATTR_CONTAINER_IMAGE) && !job->Lookup(ATTR_DOCKER_IMAGE)) {
 			push_error(stderr, "container jobs require a container_image or docker_image\n");
 			ABORT_AND_RETURN(1);
@@ -4394,6 +4427,8 @@ static bool mightTransfer( int universe )
 }
 
 
+// Universe is immutable and must be the same for all jobs in a cluster
+// So this function is only called for ProcId <= 0  (cluster ad and first proc ad)
 int SubmitHash::SetUniverse()
 {
 	RETURN_IF_ABORT();
@@ -4412,15 +4447,11 @@ int SubmitHash::SetUniverse()
 	JobGridType.clear();
 	VMType.clear();
 
-	bool CanHaveImages = false;
-	//Check to see if a docker/container image was declared in submit file
-	auto_free_ptr dockerImg(submit_param(SUBMIT_KEY_DockerImage, ATTR_DOCKER_IMAGE));
-	auto_free_ptr containerImg(submit_param(SUBMIT_KEY_ContainerImage, ATTR_CONTAINER_IMAGE));
-	if (dockerImg && containerImg) { //If both container and docker image declared then abort
-		push_error(stderr, "Both '%s' and '%s' were declared. Only one can be declared in a submit file.\n",
-							SUBMIT_KEY_DockerImage, SUBMIT_KEY_ContainerImage);
-		ABORT_AND_RETURN(1);
-	}
+	// ---------- WARNING --- WARNING ---- WARNING ---- WARNING ---- WARNING ------
+	//  TJ sez.  do not add code that looks at submit keywords here!
+	//  Most submit keywords are *not* present in the late materialization SubmitHash
+	//  Also this method is called only for ProcId <= 0
+	// ---------- WARNING --- WARNING ---- WARNING ---- WARNING ---- WARNING ------
 
 	if (univ) {
 		JobUniverse = CondorUniverseNumberEx(univ.ptr());
@@ -4429,29 +4460,53 @@ int SubmitHash::SetUniverse()
 			if (MATCH == strcasecmp(univ.ptr(), "docker")) {
 				JobUniverse = CONDOR_UNIVERSE_VANILLA;
 				IsDockerJob = true;
-				CanHaveImages = true;
 			}
 			// maybe it is the "container" topping?
 
 			if (MATCH == strcasecmp(univ.ptr(), "container")) {
 				JobUniverse = CONDOR_UNIVERSE_VANILLA;
 				IsContainerJob = true;
-				CanHaveImages = true;
 			}
 		}
 	} else {
 		// if nothing else, it must be a vanilla universe
 		//  *changed from "standard" for 7.2.0*
 		JobUniverse = CONDOR_UNIVERSE_VANILLA;
-		CanHaveImages = true;
-		if (dockerImg) IsDockerJob = true;
-		if (containerImg) IsContainerJob = true;
 	}
 
-	if (!CanHaveImages && (dockerImg || containerImg)) { //If docker or container image is in declared universe
-		push_error(stderr, "%s universe for job does not allow use of %s_image.\n",
-							CondorUniverseName(JobUniverse), dockerImg ? "docker" : "container");
-		ABORT_AND_RETURN(1);
+	// set IsDockerJob or IsContainerJob and do submit time checks
+	// for mismatch between universe topping and image declaration
+	if (clusterAd) {
+		// when materializing in the schedd, we just want to set the SubmitHash variables.
+		// error checks have already happened.
+		IsContainerJob = clusterAd->Lookup(ATTR_CONTAINER_IMAGE) || clusterAd->Lookup(ATTR_WANT_CONTAINER);
+		if ( ! IsContainerJob) {
+			IsDockerJob = clusterAd->Lookup(ATTR_DOCKER_IMAGE) != nullptr;
+		}
+	} else if (JobUniverse == CONDOR_UNIVERSE_VANILLA) {
+		auto_free_ptr containerImg(submit_param(SUBMIT_KEY_ContainerImage, ATTR_CONTAINER_IMAGE));
+		if (IsDockerJob) {
+			// universe=docker does not allow the use of container_image
+			if (containerImg) {
+				push_error(stderr, "docker universe does not allow use of container_image.\n");
+				ABORT_AND_RETURN(1);
+			}
+		} else {
+			// Universe=container or Universe=vanilla or universe not set
+			// allow either docker_image or container_image but not both
+			auto_free_ptr dockerImg(submit_param(SUBMIT_KEY_DockerImage, ATTR_DOCKER_IMAGE));
+			if (dockerImg && containerImg) {
+				push_error(stderr, "cannot declare both docker_image and container_image\n");
+				ABORT_AND_RETURN(1);
+			} else if (dockerImg || containerImg) {
+				// if any image is specified we have implicit container universe
+				IsContainerJob = true; // in case this is not already set
+				if (dockerImg) {
+					// set a job attr for Universe=container but docker_image is used instead of container_image
+					AssignJobVal(ATTR_WANT_DOCKER_IMAGE, true);
+				}
+			}
+		}
 	}
 
 	// set the universe into the job
@@ -4507,6 +4562,9 @@ int SubmitHash::SetUniverse()
 
 		if (IsContainerJob) {
 			AssignJobVal(ATTR_WANT_CONTAINER, true);
+		#if 1
+			// can't look at submit keywords here, code moved to SetExecutable
+		#else
 			auto_free_ptr container_image(submit_param(SUBMIT_KEY_ContainerImage, ATTR_CONTAINER_IMAGE));
 			auto_free_ptr docker_image(submit_param(SUBMIT_KEY_DockerImage, ATTR_DOCKER_IMAGE));
 
@@ -4538,6 +4596,7 @@ int SubmitHash::SetUniverse()
 						ABORT_AND_RETURN(1);
 					}
 				}
+		#endif
 			}
 			return 0;
 	}
@@ -4800,6 +4859,7 @@ static const SimpleSubmitKeyword prunable_keywords[] = {
 
 	// Self-checkpointing
 	{SUBMIT_KEY_CheckpointExitCode, ATTR_CHECKPOINT_EXIT_CODE, SimpleSubmitKeyword::f_as_int },
+	{SUBMIT_KEY_CheckpointDestination, ATTR_JOB_CHECKPOINT_DESTINATION, SimpleSubmitKeyword::f_as_string},
 
 	// Presigned S3 URLs
 	{SUBMIT_KEY_AWSRegion, ATTR_AWS_REGION, SimpleSubmitKeyword::f_as_string},
@@ -7426,9 +7486,121 @@ int SubmitHash::SetTransferFiles()
 	return 0;
 }
 
+/*
+*   Function to check transfer input/output lists for URL transfers
+*   against an attached protected URL map. This map is a prefix matching
+*   map of various 'scheme://path' to specific transfer queues that an
+*   admin has deemed protected. All transfer files found matching a map
+*   entry will be separated out into a new attribute in the job ad
+*   representing a list of files to transfer in association with a
+*   specified transfer queue.
+*   Example:
+*      - Map: foo:// -> alpha, bar:// -> beta
+*      - TransferInputList=one,foo://two,foo://three,bar://four,baz://five
+*   Reuslt:
+*      - TransferIn=one,baz://five
+*      - TransferInFrom_ALPHA=foo://two,foo://three
+*      - TransferInFrom_BETA=bar://four
+*      - TransferQueueInputList = [ TransferInFrom_ALPHA, TransferInFrom_BETA ]
+*   Author: Cole Bollig - 2023-10-04
+*/
+int SubmitHash::SetProtectedURLTransferLists() {
+	RETURN_IF_ABORT();
+
+	// If we don't have a protected URL map file do nothing
+	if (! protectedUrlMap) { return 0; }
+	if (protectedUrlMap->empty()) { return 0; }
+
+	// Set of queue input lists found in cluster ad to be emptied in job ad
+	std::set<std::string> clusterInputQueues;
+
+	if (clusterAd) {
+		// Check for transfer queue list in the cluster ad
+		ExprTree * tree = clusterAd->Lookup(ATTR_TRANSFER_Q_URL_IN_LIST);
+		if (tree && tree->GetKind() == ClassAd::ExprTree::EXPR_LIST_NODE) {
+			classad::ExprList* list = dynamic_cast<classad::ExprList*>(tree);
+			for(classad::ExprList::iterator it = list->begin() ; it != list->end(); ++it ) {
+				std::string attr;
+				classad::ClassAdUnParser unparser;
+				unparser.SetOldClassAd(true, true);
+				unparser.Unparse(attr, *it);
+				clusterInputQueues.insert(attr);
+			}
+		}
+	}
+
+	// Process Transfer Input Files
+	std::string input_files;
+	if (job->LookupString(ATTR_TRANSFER_INPUT_FILES, input_files)) {
+		std::string new_input_list; // Protected URL trimmed input files list
+		std::map<std::string,std::string> protected_url_lists;
+		StringTokenIterator in_files(input_files, ",");
+
+		for (const auto& file : in_files) {
+			bool is_protected = true;
+			const char* url = IsUrl(file.c_str());
+			if (url) {
+				url += 3; // Skip '://' part of URL
+				std::string queue;
+				std::string scheme = getURLType(file.c_str(), true);
+				if (protectedUrlMap->GetCanonicalization(scheme, url, queue) == 0) {
+					upper_case(queue);
+					if (queue.compare("*") == MATCH) { queue = "LOCAL"; }
+					if (protected_url_lists.contains(queue)) {
+						protected_url_lists[queue] += "," + file;
+					} else {
+						protected_url_lists.insert({queue, file});
+					}
+				} else { is_protected = false; }
+			} else { is_protected = false; }
+			// Not a protected URL then add back to transfer input list
+			if (! is_protected){
+				if (! new_input_list.empty()) { new_input_list += ","; }
+				new_input_list += file;
+			}
+		}
+
+		if (! protected_url_lists.empty()) {
+			AssignJobString(ATTR_TRANSFER_INPUT_FILES, new_input_list.c_str());
+			bool has_diff_queue_list = false;
+
+			std::vector<ExprTree*> queue_xfer_lists;
+			for (const auto& [queue, files] : protected_url_lists) {
+				std::string key = std::string(ATTR_TRANSFER_INPUT_FILES) + "From_" + queue;
+				AssignJobString(key.c_str(), files.c_str());
+				if (! clusterInputQueues.contains(key)) { has_diff_queue_list = true; }
+				clusterInputQueues.erase(key);//Remove queue list attrs that are overwritten from set to empty
+				queue_xfer_lists.push_back(classad::AttributeReference::MakeAttributeReference(nullptr, key));
+			}
+
+			if (has_diff_queue_list || clusterInputQueues.size() > 0) {
+				classad::ExprTree *list = classad::ExprList::MakeExprList(queue_xfer_lists);
+				if (! job->Insert(ATTR_TRANSFER_Q_URL_IN_LIST, list)) {
+					push_error(stderr, "failed to insert list of transfer queue input file attributes to %s\n",
+					           ATTR_TRANSFER_Q_URL_IN_LIST);
+					ABORT_AND_RETURN( 1 );
+				}
+			}
+
+			// Set all cluster ad queue input list attrs not overwritten to empty string
+			for (const auto& attr : clusterInputQueues) { AssignJobString(attr.c_str(), ""); }
+		}
+
+	}
+
+	//TODO: Process Output Remaps to URLS
+	//TODO: Check output destination for URL
+
+	return 0;
+}
+
 int SubmitHash::FixupTransferInputFiles()
 {
+
 	RETURN_IF_ABORT();
+
+	// Check transfer in/out list against protected URL map
+	SetProtectedURLTransferLists();
 
 		// See the comment in the function body of ExpandInputFileList
 		// for an explanation of what is going on here.
@@ -7744,7 +7916,7 @@ int SubmitHash::init_base_ad(time_t submit_time_in, const char * username)
 
 	// set up types of the ad
 	SetMyTypeName (baseJob, JOB_ADTYPE);
-	baseJob.Assign(ATTR_TARGET_TYPE, STARTD_ADTYPE); // needed for HTCondor before version 23.0
+	baseJob.Assign(ATTR_TARGET_TYPE, STARTD_OLD_ADTYPE); // needed for HTCondor before version 23.0
 
 	if (submit_time_in) {
 		submit_time = submit_time_in;
@@ -8537,7 +8709,7 @@ int SubmitHash::parse_q_args(
 	while (isspace(*pqargs)) ++pqargs;
 
 	// parse the queue arguments, handling the count and finding the in,from & matching keywords
-	// on success pqargs will point to to \0 or to just after the keyword.
+	// on success pqargs will point to \0 or to just after the keyword.
 	rval = o.parse_queue_args(pqargs);
 	if (rval < 0) {
 		errmsg = "invalid Queue statement";
@@ -8894,6 +9066,7 @@ const char* SubmitHash::to_string(std::string & out, int flags)
 
 enum FixupKeyId {
 	idKeyNone=0,
+	idKeyUniverse,
 	idKeyExecutable,
 	idKeyInitialDir,
 };
@@ -8920,6 +9093,7 @@ static const DIGEST_FIXUP_KEY aDigestFixupAttrs[] = {
 	{ SUBMIT_KEY_InitialDir,    idKeyInitialDir }, // "initialdir"
 	{ ATTR_JOB_IWD,             idKeyInitialDir }, // "Iwd"
 	{ SUBMIT_KEY_JobIwd,        idKeyInitialDir }, // "job_iwd"     <- special case legacy hack (sigh)
+	{ SUBMIT_KEY_Universe,      idKeyUniverse },
 };
 
 // while building a submit digest, fixup right hand side for certain key=rhs pairs
@@ -8934,9 +9108,10 @@ void SubmitHash::fixup_rhs_for_digest(const char * key, std::string & rhs)
 	// Some universes don't have an actual executable, so we have to look deeper for that key
 	// TODO: capture pseudo-ness explicitly in SetExecutable? so we don't have to keep this in sync...
 	bool pseudo = false;
-	if (found->id == idKeyExecutable) {
+	const char * topping = nullptr;
+	if (found->id == idKeyExecutable || found->id == idKeyUniverse) {
 		std::string sub_type;
-		int uni = query_universe(sub_type);
+		int uni = query_universe(sub_type, topping);
 		if (uni == CONDOR_UNIVERSE_VM) {
 			pseudo = true;
 		} else if (uni == CONDOR_UNIVERSE_GRID) {
@@ -8944,6 +9119,9 @@ void SubmitHash::fixup_rhs_for_digest(const char * key, std::string & rhs)
 			pseudo = (sub_type == "ec2" || sub_type == "gce" || sub_type == "azure");
 		}
 	}
+
+	// set the topping as the universe if there is a topping
+	if (found->id == idKeyUniverse && topping) { rhs = topping; }
 
 	// the Executable and InitialDir should be expanded to a fully qualified path here.
 	if (found->id == idKeyInitialDir || (found->id == idKeyExecutable && !pseudo)) {
@@ -8958,11 +9136,16 @@ void SubmitHash::fixup_rhs_for_digest(const char * key, std::string & rhs)
 
 // returns the universe and grid type, either by looking at the cached values
 // or by querying the hashtable if the cached values haven't been set yet.
-int SubmitHash::query_universe(std::string & sub_type)
+int SubmitHash::query_universe(std::string & sub_type, const char * & topping)
 {
+	topping = nullptr;
 	if (JobUniverse != CONDOR_UNIVERSE_MIN) {
 		if (JobUniverse == CONDOR_UNIVERSE_GRID) { sub_type = JobGridType; }
 		else if (JobUniverse == CONDOR_UNIVERSE_VM) { sub_type = VMType; }
+		else if (JobUniverse == CONDOR_UNIVERSE_VANILLA) {
+			if (IsContainerJob) { topping = "container"; }
+			else if (IsDockerJob) { topping = "docker"; }
+		}
 		return JobUniverse;
 	}
 
@@ -8979,9 +9162,11 @@ int SubmitHash::query_universe(std::string & sub_type)
 			// maybe it's a topping?
 			if (MATCH == strcasecmp(univ.ptr(), "docker")) {
 				uni = CONDOR_UNIVERSE_VANILLA;
+				topping = "docker";
 			}
 			if (MATCH == strcasecmp(univ.ptr(), "container")) {
 				uni = CONDOR_UNIVERSE_VANILLA;
+				topping = "container";
 			}
 		}
 	} else {
@@ -8998,6 +9183,15 @@ int SubmitHash::query_universe(std::string & sub_type)
 	} else if (uni == CONDOR_UNIVERSE_VM) {
 		sub_type = submit_param_string(SUBMIT_KEY_VM_Type, ATTR_JOB_VM_TYPE);
 		lower_case(sub_type);
+	} else if (uni == CONDOR_UNIVERSE_VANILLA) {
+		if ( ! topping) {
+			// set the implicit container universe topping
+			std::string str;
+			if (submit_param_exists(SUBMIT_KEY_ContainerImage, ATTR_CONTAINER_IMAGE, str) ||
+				submit_param_exists(SUBMIT_KEY_DockerImage, ATTR_DOCKER_IMAGE, str)) {
+				topping = "container";
+			}
+		}
 	}
 
 	return uni;
@@ -9035,6 +9229,17 @@ const char* SubmitHash::make_digest(std::string & out, int cluster_id, StringLis
 	}
 
 	std::string rhs;
+
+	// if submit file has no universe command, and the effective universe is a topping
+	// we want to put the topping into the digest to simplify things for the schedd
+	std::string str;
+	if ( ! submit_param_exists(SUBMIT_KEY_Universe, ATTR_JOB_UNIVERSE, str)) {
+		std::string sub_type;
+		const char * topping = nullptr;
+		if (query_universe(sub_type, topping) == CONDOR_UNIVERSE_VANILLA && topping) {
+			formatstr_cat(out, "Universe=%s\n", topping);
+		}
+	}
 
 	// tell the job factory to skip processing SetRequirements and just use the cluster requirements for all jobs
 	out += "FACTORY.Requirements=MY.Requirements\n";

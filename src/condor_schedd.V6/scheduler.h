@@ -754,8 +754,10 @@ class Scheduler : public Service
 
 	bool forwardMatchToSidecarCM(const char *claim_id, const char *claim_ids, ClassAd &match_ad, const char *slot_name);
 
-	// Returns false if the checkpoint clean-up failed to launch.
-	bool doCheckpointCleanUp( int cluster, int proc, ClassAd * jobAd );
+	void doCheckpointCleanUp( int cluster, int proc, ClassAd * jobAd );
+
+	// Return a pointer to the protected URL map for late materilization factories
+	MapFile* getProtectedUrlMap() { return &m_protected_url_map; }
 
 private:
 
@@ -1104,6 +1106,8 @@ private:
 
 	bool m_include_default_flock_param{true};
 	DCTokenRequester m_token_requester;
+
+	MapFile m_protected_url_map;
 
 	friend class DedicatedScheduler;
 };

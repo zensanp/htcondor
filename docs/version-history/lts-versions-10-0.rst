@@ -14,21 +14,26 @@ Version 10.0.9
 
 Release Notes:
 
-.. HTCondor version 10.0.9 released on Month Date, 2023.
-
-- HTCondor version 10.0.9 not yet released.
+- HTCondor version 10.0.9 released on September 28, 2023.
 
 New Features:
 
-- None.
+- Updated *condor_upgrade_check* script to check and warn about known incompatibilities
+  introduced in the feature series for HTCondor ``V10`` that can cause issues when
+  upgrading to a newer version (i.e. HTCondor ``V23``).
+  :jira:`1960`
 
 Bugs Fixed:
+
+- Fixed :mod:`htcondor.htchirp` to find its configuration at `_CONDOR_CHIRP_CONFIG`
+  instead of at `_CONDOR_SCRATCH_DIR/.chirp.config`.
+  :jira:`2012`
 
 - Fixed a bug that prevented deletion of stored user passwords with
   *condor_store_cred* on Windows.
   :jira:`1998`
 
-- Fixed an issue for the PPC build with misaligned pointers in the config system.
+- Fixed misaligned pointers issue for the PowerPC architecture in the configuration system.
   :jira:`2001`
 
 .. _lts-version-history-1008:
@@ -38,9 +43,7 @@ Version 10.0.8
 
 Release Notes:
 
-.. HTCondor version 10.0.8 released on Month Date, 2023.
-
-- HTCondor version 10.0.8 not yet released.
+- HTCondor version 10.0.8 released on September 14, 2023.
 
 New Features:
 
@@ -52,11 +55,6 @@ Bugs Fixed:
   a kernel panic in some EL8 kernels.
   :jira:`1985`
 
-- Fixed a bug with parallel universe that would result in the *condor_startd*
-  rejecting start attempts from the *condor_schedd* and causing the *condor_schedd*
-  to crash.
-  :jira:`1959`
-
 - Fixed a bug in DAGMan where service nodes that finish before the DAGs
   end would result in DAGMan crashing due to an assertion failure.
   :jira:`1909`
@@ -65,14 +63,6 @@ Bugs Fixed:
   administrator.  Prior versions of HTCondor would send an arbitrarily large number
   of emails.  Now HTCondor will only send one email per day.
   :jira:`1937`
-
-- Preen now preserves all files in the spool directory matching `*OfflineLog*`
-  so that central managers with multiple active collectors can have offline
-  ads.
-  :jira:`1933`
-
-- Fixed a bug that could cause *condor_config_val* to crash when there were no configuration files.
-  :jira:`1954`
 
 - Fixed a bug where *condor_adstash* would not import the OpenSearch library properly.
   :jira:`1965`
@@ -84,6 +74,19 @@ Bugs Fixed:
   new attributes needed to be added to the index and when using version 8.0.0 or newer of
   the Elasticsearch Python library.
   :jira:`1930`
+
+- Fixed a bug with parallel universe that would result in the *condor_startd*
+  rejecting start attempts from the *condor_schedd* and causing the *condor_schedd*
+  to crash.
+  :jira:`1952`
+
+- Preen now preserves all files in the spool directory matching `*OfflineLog*`
+  so that central managers with multiple active collectors can have offline
+  ads.
+  :jira:`1933`
+
+- Fixed a bug that could cause *condor_config_val* to crash when there were no configuration files.
+  :jira:`1954`
 
 .. _lts-version-history-1007:
 

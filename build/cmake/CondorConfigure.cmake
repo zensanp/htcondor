@@ -560,7 +560,6 @@ if("${OS_NAME}" STREQUAL "LINUX")
 
     if (HAVE_XSS_H)
 	  find_library(HAVE_XSS Xss)
-	  find_library(HAVE_XEXT Xext)
 	endif()
 
     check_include_files("systemd/sd-daemon.h" HAVE_SD_DAEMON_H)
@@ -864,6 +863,18 @@ else ()
 endif(WINDOWS)
 
 add_subdirectory(${CONDOR_SOURCE_DIR}/src/safefile)
+
+# We'll do the installation ourselves, below
+set (FMT_INSTALL false)
+
+add_subdirectory(${CONDOR_SOURCE_DIR}/src/vendor/fmt-10.1.0)
+
+# But don't try to install the header files anywhere
+set_target_properties(fmt PROPERTIES PUBLIC_HEADER "")
+install(TARGETS fmt
+	LIBRARY DESTINATION "${C_LIB}"
+	ARCHIVE DESTINATION "${C_LIB}"
+	RUNTIME DESTINATION "${C_LIB}")
 
 ### addition of a single externals target which allows you to
 if (CONDOR_EXTERNALS)

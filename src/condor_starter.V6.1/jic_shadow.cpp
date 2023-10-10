@@ -48,6 +48,7 @@
 #include "credmon_interface.h"
 #include "condor_base64.h"
 #include "zkm_base64.h"
+#include <filesystem>
 #include "manifest.h"
 #include "checksum.h"
 
@@ -1202,9 +1203,17 @@ JICShadow::uploadCheckpointFiles(int checkpointNumber)
 
 	if( !rval ) {
 		// Failed to transfer.
-		dprintf( D_ALWAYS, "JICShadow::uploadCheckpointFiles() failed.\n" );
-		holdJob( "Starter failed to upload checkpoint",
-		         CONDOR_HOLD_CODE::FailedToCheckpoint, -1 );
+		m_ft_info = filetrans->GetInfo();
+		if (m_ft_info.try_again) {
+			dprintf(D_ALWAYS, "JICShadow::uploadCheckpointFiles() failed: %s\n", m_ft_info.error_desc.c_str());
+			dprintf(D_ALWAYS, "JICShadow::uploadCheckpointFiles() will retry checkpoint upload later.\n");
+			return false;
+		} else {
+			dprintf(D_ALWAYS, "JICShadow::uploadCheckpointFiles() putting job on hold, checkpoint failure was: %s\n", m_ft_info.error_desc.c_str());
+			holdJob("Starter failed to upload checkpoint", CONDOR_HOLD_CODE::FailedToCheckpoint, -1);
+			return false;
+		}
+
 		return false;
 	}
 	dprintf( D_FULLDEBUG, "JICShadow::uploadCheckpointFiles() succeeded.\n" );
@@ -2553,7 +2562,14 @@ JICShadow::transferCompleted( FileTransfer *ftrans )
 				                   ft_info.hold_code,ft_info.hold_subcode);
 			}
 
-			EXCEPT( "Failed to transfer files" );
+			std::string message {"Failed to transfer files: "};
+			if (ft_info.error_desc.empty()) {
+				message += " reason unknown.";
+			} else {
+				message += ft_info.error_desc;
+			}
+
+			EXCEPT("%s", message.c_str());
 		}
 
 		// It's not enought to for the FTO to believe that the transfer

@@ -3689,7 +3689,7 @@ count_a_job(JobQueueBase* ad, const JOB_ID_KEY& /*jid*/, void*)
 bool
 service_this_universe(int universe, ClassAd* job)
 {
-	// "service" seems to to really mean find a matching resource or not...
+	// "service" seems to really mean find a matching resource or not...
 
 	/*  If a non-grid job is externally managed, it's been grabbed by
 		the schedd-on-the-side and we don't want to touch it.
@@ -13644,6 +13644,11 @@ Scheduler::Init()
 	JobStopCount = param_integer( "JOB_STOP_COUNT", 1, 1 );
 	stop_job_queue.setCountPerInterval( JobStopCount );
 
+	m_protected_url_map.clear();
+	auto_free_ptr protectedUrlMapFile(param("PROTECTED_URL_TRANSFER_MAPFILE"));
+	if (protectedUrlMapFile) {
+		m_protected_url_map.ParseCanonicalizationFile(protectedUrlMapFile.ptr(), true, true, true);
+	}
 		////////////////////////////////////////////////////////////////////
 		// Initialize the queue managment code
 		////////////////////////////////////////////////////////////////////
